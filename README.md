@@ -224,18 +224,12 @@ Suggest:
 - PyMuPDF
 
 ## Frontend
-
-Choose any one:
-
-### Recommended:
 - Streamlit (Fast Development)
 
-### Advanced:
-- React.js + Tailwind CSS
 
 ## Database
 
-- PostgreSQL / MySQL / SQLite
+-------
 
 ## Deployment
 
