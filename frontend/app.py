@@ -3,7 +3,7 @@ import requests
 import plotly.express as px
 import pandas as pd
 
-API_URL = "http://localhost:8000"
+API_URL = "https://resume-screening-platform-hirelens-ai.onrender.com"
 
 st.set_page_config(page_title="Resume Screening Platform", layout="wide")
 st.title("AI-Powered Resume Screening Platform")
