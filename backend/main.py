@@ -1,101 +1,95 @@
-import re
-import pdfplumber
-from docx import Document
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import shutil, os, uuid
 
-SKILLS_LIST = [
-    "python", "java", "javascript", "typescript", "c++", "c#", "go", "rust",
-    "sql", "mysql", "postgresql", "mongodb", "redis", "sqlite",
-    "react", "angular", "vue", "html", "css", "tailwind",
-    "fastapi", "flask", "django", "node.js", "express",
-    "machine learning", "deep learning", "nlp", "computer vision",
-    "scikit-learn", "tensorflow", "pytorch", "keras", "pandas", "numpy",
-    "aws", "azure", "gcp", "docker", "kubernetes", "git", "linux",
-    "power bi", "tableau", "excel", "data analysis", "data visualization",
-    "rest api", "graphql", "microservices", "agile", "scrum"
-]
+from backend.ml.parser import parse_resume
+from backend.ml.matcher import rank_candidates, match_resume_to_jd
+from backend.ml.bias_filter import anonymize_resume
+from backend.ml.explainer import explain_match_score
 
-def extract_text_from_pdf(file_path: str) -> str:
-    text = ""
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
+app = FastAPI(title="Resume Screening API", version="1.0")
 
-def extract_text_from_docx(file_path: str) -> str:
-    doc = Document(file_path)
-    return "\n".join([para.text for para in doc.paragraphs])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def extract_text(file_path: str) -> str:
-    if file_path.endswith(".pdf"):
-        return extract_text_from_pdf(file_path)
-    elif file_path.endswith(".docx"):
-        return extract_text_from_docx(file_path)
-    else:
-        raise ValueError("Only PDF and DOCX files are supported")
+UPLOAD_DIR = "data/uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-def extract_email(text: str) -> str:
-    match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
-    return match.group(0) if match else ""
 
-def extract_phone(text: str) -> str:
-    match = re.search(
-        r"(\+91[\-\s]?)?[6-9]\d{9}|(\+\d{1,3}[\-\s]?)?\(?\d{3}\)?[\-\s]?\d{3}[\-\s]?\d{4}",
-        text
-    )
-    return match.group(0) if match else ""
+@app.get("/")
+def root():
+    return {"message": "Resume Screening API is running"}
 
-def extract_name(text: str) -> str:
-    skip_keywords = [
-        "resume", "curriculum", "vitae", "cv", "profile", "objective",
-        "summary", "education", "experience", "skills", "projects",
-        "contact", "address", "phone", "email", "linkedin", "github"
-    ]
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    for line in lines[:8]:
-        line_lower = line.lower()
-        if re.search(r"[@:/\\]|\d{7,}", line):
-            continue
-        if any(kw in line_lower for kw in skip_keywords):
-            continue
-        if re.match(r"^[A-Za-z][A-Za-z\s\.]{2,40}$", line):
-            words = line.split()
-            if 1 <= len(words) <= 5:
-                return line
-    return lines[0] if lines else "Unknown"
 
-def extract_skills(text: str) -> list:
-    text_lower = text.lower()
-    found = [skill for skill in SKILLS_LIST if skill in text_lower]
-    return list(set(found))
+@app.post("/parse-resume")
+async def parse_resume_endpoint(file: UploadFile = File(...)):
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["pdf", "docx"]:
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX allowed")
+    file_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.{ext}"
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    result = parse_resume(file_path)
+    os.remove(file_path)
+    return result
 
-def extract_education(text: str) -> list:
-    education = []
-    degrees = [
-        "b.tech", "btech", "b.e", "m.tech", "mtech", "mca", "bca",
-        "bachelor", "master", "phd", "b.sc", "m.sc", "mba"
-    ]
-    lines = text.split("\n")
-    for line in lines:
-        if any(deg in line.lower() for deg in degrees):
-            education.append(line.strip())
-    return education[:3]
 
-def extract_experience_years(text: str) -> float:
-    matches = re.findall(r"(\d+\.?\d*)\s*\+?\s*years?", text.lower())
-    if matches:
-        return max(float(m) for m in matches)
-    return 0.0
+@app.post("/match")
+async def match_endpoint(
+    file: UploadFile = File(...),
+    jd_text: str = Form(...)
+):
+    ext = file.filename.split(".")[-1].lower()
+    file_path = f"{UPLOAD_DIR}/{uuid.uuid4()}.{ext}"
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    parsed = parse_resume(file_path)
+    result = match_resume_to_jd(parsed, jd_text)
+    explanation = explain_match_score(result, jd_text)
+    os.remove(file_path)
+    return {**result, "explanation": explanation}
 
-def parse_resume(file_path: str) -> dict:
-    text = extract_text(file_path)
-    return {
-        "raw_text": text,
-        "name": extract_name(text),
-        "email": extract_email(text),
-        "phone": extract_phone(text),
-        "skills": extract_skills(text),
-        "education": extract_education(text),
-        "experience_years": extract_experience_years(text),
-    }
+
+@app.post("/rank-candidates")
+async def rank_candidates_endpoint(
+    files: list[UploadFile] = File(...),
+    jd_text: str = Form(...)
+):
+    parsed_list = []
+    saved_paths = []
+    for file in files:
+        ext = file.filename.split(".")[-1].lower()
+        path = f"{UPLOAD_DIR}/{uuid.uuid4()}.{ext}"
+        with open(path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved_paths.append(path)
+        parsed_list.append(parse_resume(path))
+    ranked = rank_candidates(parsed_list, jd_text)
+    for path in saved_paths:
+        os.remove(path)
+    return {"total_candidates": len(ranked), "ranked_candidates": ranked}
+
+
+@app.post("/rank-candidates-blind")
+async def rank_blind(
+    files: list[UploadFile] = File(...),
+    jd_text: str = Form(...)
+):
+    parsed_list = []
+    saved_paths = []
+    for file in files:
+        ext = file.filename.split(".")[-1].lower()
+        path = f"{UPLOAD_DIR}/{uuid.uuid4()}.{ext}"
+        with open(path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved_paths.append(path)
+        parsed = parse_resume(path)
+        parsed_list.append(anonymize_resume(parsed))
+    ranked = rank_candidates(parsed_list, jd_text)
+    for path in saved_paths:
+        os.remove(path)
+    return {"mode": "bias-free", "total": len(ranked), "ranked_candidates": ranked}
